@@ -1460,14 +1460,6 @@ public class MInOut extends X_M_InOut implements IDocument
 			if (product != null
 					&& Services.get(IProductBL.class).isStocked(product))
 			{
-				// Ignore the Material Policy when is Reverse Correction
-				if (!isReversal())
-				{
-					checkMaterialPolicy(sLine);
-				}
-
-				log.debug("Material Transaction");
-				MTransaction mtrx = null;
 				// same warehouse in order and receipt?
 				boolean sameWarehouse = true;
 				// Reservation ASI - assume none
@@ -1480,6 +1472,7 @@ public class MInOut extends X_M_InOut implements IDocument
 
 				final IStorageBL storageBL = Services.get(IStorageBL.class);
 
+				log.debug("Material Transaction");
 				//
 				if (sLine.getM_AttributeSetInstance_ID() == 0)
 				{
@@ -1579,10 +1572,10 @@ public class MInOut extends X_M_InOut implements IDocument
 								BigDecimal.ZERO, QtySO.negate(), QtyPO.negate(), get_TrxName());
 					}
 					// FallBack: Create Transaction
-					mtrx = new MTransaction(getCtx(), sLine.getAD_Org_ID(),
-							MovementType, sLine.getM_Locator_ID(),
-							sLine.getM_Product_ID(), sLine.getM_AttributeSetInstance_ID(),
-							Qty, getMovementDate(), get_TrxName());
+					final MTransaction mtrx = new MTransaction(getCtx(), sLine.getAD_Org_ID(),
+															   MovementType, sLine.getM_Locator_ID(),
+															   sLine.getM_Product_ID(), sLine.getM_AttributeSetInstance_ID(),
+															   Qty, getMovementDate(), get_TrxName());
 					mtrx.setM_InOutLine_ID(sLine.getM_InOutLine_ID());
 					InterfaceWrapperHelper.save(mtrx);
 				}
@@ -2052,101 +2045,6 @@ public class MInOut extends X_M_InOut implements IDocument
 		}
 	}
 
-	/**
-	 * Check Material Policy Sets line ASI
-	 */
-	private void checkMaterialPolicy(final MInOutLine line)
-	{
-		MInOutLineMA.deleteInOutLineMA(line.getM_InOutLine_ID(), get_TrxName());
-
-		// Incoming Trx
-		final String MovementType = getMovementType();
-		final boolean inTrx = MovementType.charAt(1) == '+'; // V+ Vendor Receipt
-
-		boolean needSave = false;
-		final MProduct product = line.getProduct();
-
-		// Need to have Location
-		if (product != null
-				&& line.getM_Locator_ID() == 0)
-		{
-			// MWarehouse w = MWarehouse.get(getCtx(), getM_Warehouse_ID());
-			line.setM_Warehouse_ID(getM_Warehouse_ID());
-			line.setM_Locator_ID(inTrx ? BigDecimal.ZERO : line.getMovementQty()); // default Locator
-			needSave = true;
-		}
-
-		// Attribute Set Instance
-		// Create an Attribute Set Instance to any receipt FIFO/LIFO
-		if (product != null && line.getM_AttributeSetInstance_ID() == 0)
-		{
-			// Validate Transaction
-			if (getMovementType().compareTo(MInOut.MOVEMENTTYPE_CustomerReturns) == 0
-					|| getMovementType().compareTo(MInOut.MOVEMENTTYPE_VendorReceipts) == 0)
-			{
-				MAttributeSetInstance asi = null;
-				// always create asi so fifo/lifo work.
-				if (asi == null)
-				{
-					asi = MAttributeSetInstance.create(getCtx(), product, get_TrxName());
-				}
-				line.setM_AttributeSetInstance_ID(asi.getM_AttributeSetInstance_ID());
-				log.debug("New ASI={}", line);
-				needSave = true;
-			}
-			// Create consume the Attribute Set Instance using policy FIFO/LIFO
-			else if (getMovementType().compareTo(MInOut.MOVEMENTTYPE_VendorReturns) == 0 || getMovementType().compareTo(MInOut.MOVEMENTTYPE_CustomerShipment) == 0)
-			{
-				final String MMPolicy = Services.get(IProductBL.class).getMMPolicy(product);
-				final Timestamp minGuaranteeDate = getMovementDate();
-				final MStorage[] storages = MStorage.getWarehouse(getCtx(),
-						getM_Warehouse_ID(), line.getM_Product_ID(), line.getM_AttributeSetInstance_ID(),
-						minGuaranteeDate, MClient.MMPOLICY_FiFo.equals(MMPolicy), true, line.getM_Locator_ID(), get_TrxName());
-				BigDecimal qtyToDeliver = line.getMovementQty();
-				for (final MStorage storage : storages)
-				{
-					if (storage.getQtyOnHand().compareTo(qtyToDeliver) >= 0)
-					{
-						final MInOutLineMA ma = new MInOutLineMA(line,
-								0, // storage.getM_AttributeSetInstance_ID(),
-								qtyToDeliver);
-						ma.saveEx();
-						qtyToDeliver = BigDecimal.ZERO;
-					}
-					else
-					{
-						final MInOutLineMA ma = new MInOutLineMA(line,
-								0, // storage.getM_AttributeSetInstance_ID(),
-								storage.getQtyOnHand());
-						ma.saveEx();
-						qtyToDeliver = qtyToDeliver.subtract(storage.getQtyOnHand());
-						log.debug("{}, QtyToDeliver={}", ma, qtyToDeliver);
-					}
-
-					if (qtyToDeliver.signum() == 0)
-					{
-						break;
-					}
-				}
-
-				if (qtyToDeliver.signum() != 0)
-				{
-					// deliver using new asi
-					final MAttributeSetInstance asi = MAttributeSetInstance.create(getCtx(), product, get_TrxName());
-					final int M_AttributeSetInstance_ID = asi.getM_AttributeSetInstance_ID();
-					final MInOutLineMA ma = new MInOutLineMA(line, M_AttributeSetInstance_ID, qtyToDeliver);
-					ma.saveEx();
-					log.debug("##: {}", ma);
-				}
-			}  // outgoing Trx
-		}  // attributeSetInstance
-
-		if (needSave)
-		{
-			line.saveEx();
-		}
-	} // checkMaterialPolicy
-
 	/**************************************************************************
 	 * Create Counter Document
 	 *
@@ -2416,19 +2314,6 @@ public class MInOut extends X_M_InOut implements IDocument
 			sLine.setReversalLine_ID(rLine.getM_InOutLine_ID());
 			InterfaceWrapperHelper.save(sLine);
 
-			// We need to copy MA
-			if (rLine.getM_AttributeSetInstance_ID() <= 0)
-			{
-				final MInOutLineMA mas[] = MInOutLineMA.get(getCtx(),
-						sLine.getM_InOutLine_ID(), get_TrxName());
-				for (final MInOutLineMA ma2 : mas)
-				{
-					final MInOutLineMA ma = new MInOutLineMA(rLine,
-							ma2.getM_AttributeSetInstance_ID(),
-							ma2.getMovementQty().negate());
-					ma.saveEx();
-				}
-			}
 			// De-Activate Asset
 			final MAsset asset = MAsset.getFromShipment(getCtx(), sLine.getM_InOutLine_ID(), get_TrxName());
 			if (asset != null)
@@ -2579,12 +2464,6 @@ public class MInOut extends X_M_InOut implements IDocument
 			}
 
 			// TODO: check if there are more places where to look and check if the inout line was already invoiced
-
-			// Delete material allocations
-			for (final MInOutLineMA ma : MInOutLineMA.get(getCtx(), inoutLine.getM_InOutLine_ID(), get_TrxName()))
-			{
-				InterfaceWrapperHelper.delete(ma);
-			}
 
 			// Delete M_Transactions
 			for (final I_M_Transaction mtrx : transactionDAO.retrieveReferenced(inoutLine))
